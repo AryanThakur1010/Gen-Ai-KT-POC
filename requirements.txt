@@ -1,0 +1,5 @@
+python-docx
+openai==2.3.0
+python-dotenv
+chromadb==1.1.1
+tqdm

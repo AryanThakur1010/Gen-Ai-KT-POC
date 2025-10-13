@@ -1,0 +1,19 @@
+# Credentials
+config.py
+.env
+
+# Virtual Environment
+venv/
+
+# Data and Output
+chroma_store/chroma_data/
+output/markdown
+
+
+# Python
+__pycache__/
+*.pyc
+
+# IDE
+.vscode/
+*.swp
