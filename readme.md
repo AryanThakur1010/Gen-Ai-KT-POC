@@ -169,31 +169,6 @@ CHAT_MODEL = os.getenv("AZURE_OPENAI_DEPLOYMENT")
 EMBED_MODEL = os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT")
 
 ```
-
-Create a file named .gitignore in your project root and add the following content:
-
-```
-# Credentials
-config.py
-.env
-
-# Virtual Environment
-venv/
-
-# Data and Output
-chroma_store/chroma_data/
-output/markdown
-
-
-# Python
-__pycache__/
-*.pyc
-
-# IDE
-.vscode/
-*.swp
-
-```
 Before pushing code- delete all word docs from data/input_docs folder.                                                         
 
 ### 2. Get Azure OpenAI Credentials
