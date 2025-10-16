@@ -1,6 +1,7 @@
-from modules.embedding_manager import collection, generate_embedding
+from modules.embedding_manager import collection, generate_embedding, chunk_text
 import os
 import re
+import numpy as np
 
 def strip_embedded_images(md_content):
     """
@@ -23,6 +24,7 @@ def strip_embedded_images(md_content):
 def generate_backlinks(current_doc, current_title, threshold=0.25, top_k=10):
     """
     Find semantically similar docs and return backlinks.
+    Uses chunking + averaging strategy for long documents.
     
     Args:
         current_doc: The full text of the current document
@@ -36,8 +38,22 @@ def generate_backlinks(current_doc, current_title, threshold=0.25, top_k=10):
     # Strip embedded images before creating embedding
     cleaned_doc = strip_embedded_images(current_doc)
     
-    # Generate embedding from cleaned text
-    current_embedding = generate_embedding(cleaned_doc)
+    # Check if document needs chunking
+    chunks = chunk_text(cleaned_doc, max_tokens=6000, overlap=200)
+    
+    if len(chunks) == 1:
+        # Single chunk - process normally
+        current_embedding = generate_embedding(chunks[0])
+    else:
+        # Multiple chunks - average their embeddings
+        print(f"    📊 Generating embedding from {len(chunks)} chunks...")
+        chunk_embeddings = []
+        for i, chunk in enumerate(chunks):
+            chunk_emb = generate_embedding(chunk)
+            chunk_embeddings.append(chunk_emb)
+        
+        # Average all chunk embeddings to get document-level embedding
+        current_embedding = np.mean(chunk_embeddings, axis=0).tolist()
 
     results = collection.query(
         query_embeddings=[current_embedding],
