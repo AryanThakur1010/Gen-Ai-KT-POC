@@ -201,6 +201,9 @@ AZURE_OPENAI_EMBEDDING_DEPLOYMENT= text-embedding-ada-002
 
 ### 1. Add Word Documents
 
+Go to the confluence page that you want to convert to Obsidian md file. Click on three dots on right upper side. Click export -> export to word. 
+This will save the file in .doc format. Open the file and save it as .docx format.
+
 Place your `.docx` files in the `data/input_docs/` folder:
 
 ```
