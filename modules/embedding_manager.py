@@ -1,11 +1,10 @@
 from openai import AzureOpenAI
 from config import *
 import chromadb
-import os
-import tiktoken
+from modules.utils.utils import strip_images, truncate_text
 
-chroma_client = chromadb.PersistentClient(path="./chroma_store/chroma_data")
-collection = chroma_client.get_or_create_collection(name="confluence_notes")
+chroma_client = chromadb.PersistentClient(path=CHROMA_PATH)
+collection = chroma_client.get_or_create_collection(name="confluence_notes_v3")
 
 client = AzureOpenAI(
     api_key=AZURE_OPENAI_API_KEY,
@@ -13,100 +12,63 @@ client = AzureOpenAI(
     azure_endpoint=AZURE_OPENAI_ENDPOINT
 )
 
-# Initialize tokenizer for chunking
-tokenizer = tiktoken.get_encoding("cl100k_base")
-
-def chunk_text(text, max_tokens=6000, overlap=200):
-    """
-    Split text into chunks that fit within embedding model limits.
-    
-    Args:
-        text: Full document text
-        max_tokens: Maximum tokens per chunk (default 6000, safe for 8k limit)
-        overlap: Token overlap between chunks for context continuity
-    
-    Returns:
-        List of text chunks
-    """
-    tokens = tokenizer.encode(text)
-    chunks = []
-    
-    start = 0
-    while start < len(tokens):
-        end = start + max_tokens
-        chunk_tokens = tokens[start:end]
-        chunk_text = tokenizer.decode(chunk_tokens)
-        chunks.append(chunk_text)
-        
-        # Move start forward, accounting for overlap
-        start = end - overlap
-    
-    return chunks
 
 def generate_embedding(text):
-    """Generate embedding for a single text chunk."""
+    """Generate embedding."""
+    text_clean = strip_images(text)
+    text_clean = truncate_text(text_clean, 7000)  # Safe limit for embeddings
+    
+    if not text_clean.strip():
+        return None
+    
     response = client.embeddings.create(
-        input=text,
+        input=text_clean,
         model=EMBED_MODEL
     )
     return response.data[0].embedding
 
-def store_in_chroma(doc_id, text, metadata):
-    """
-    Store document in ChromaDB with automatic chunking for long documents.
-    
-    Args:
-        doc_id: Unique identifier for the document
-        text: Full markdown text
-        metadata: Document metadata (title, source, etc.)
-    """
-    # Check token count
-    token_count = len(tokenizer.encode(text))
-    
-    if token_count > 6000:
-        # Chunk the document
-        chunks = chunk_text(text)
-        print(f"  └─ Document '{doc_id}' split into {len(chunks)} chunks ({token_count} tokens)")
-        
-        for i, chunk in enumerate(chunks):
-            chunk_id = f"{doc_id}_chunk_{i}"
-            embedding = generate_embedding(chunk)
-            
-            # Add chunk index to metadata
-            chunk_metadata = metadata.copy()
-            chunk_metadata["chunk_index"] = i
-            chunk_metadata["total_chunks"] = len(chunks)
-            chunk_metadata["parent_doc"] = doc_id
-            
-            collection.add(
-                ids=[chunk_id],
-                embeddings=[embedding],
-                metadatas=[chunk_metadata],
-                documents=[chunk]
-            )
-    else:
-        # Store as single document
-        embedding = generate_embedding(text)
-        collection.add(
-            ids=[doc_id],
-            embeddings=[embedding],
-            metadatas=[metadata],
-            documents=[text]
-        )
 
-def get_all_documents():
-    """
-    Retrieve all unique document titles from ChromaDB.
-    Returns set of parent document IDs (not chunk IDs).
-    """
-    all_data = collection.get()
-    doc_ids = set()
+def store_chunk(chunk, document_title, tags, breadcrumb=""):
+    """Store chunk in ChromaDB."""
+    text = chunk.get_text_without_images()
     
-    for metadata in all_data['metadatas']:
-        # Check if this is a chunk or a full document
-        if 'parent_doc' in metadata:
-            doc_ids.add(metadata['parent_doc'])
-        else:
-            doc_ids.add(metadata['title'])
+    if not text.strip():
+        return
     
-    return doc_ids
+    embedding = generate_embedding(text)
+    if not embedding:
+        return
+    
+    metadata = {
+        "title": chunk.heading,
+        "document": document_title,
+        "level": chunk.level,
+        "chunk_id": chunk.chunk_id,
+        "parent_id": chunk.parent_id or "",
+        "tags": ",".join(tags),
+        "breadcrumb": breadcrumb,
+        "has_children": len(chunk.children) > 0
+    }
+    
+    collection.add(
+        ids=[chunk.chunk_id],
+        embeddings=[embedding],
+        metadatas=[metadata],
+        documents=[text[:1000]]  # Store preview only
+    )
+
+
+def query_by_tags(tags, n_results=10):
+    """Query by tags."""
+    tag_filters = [{"tags": {"$contains": tag}} for tag in tags]
+    
+    if tag_filters:
+        try:
+            results = collection.get(
+                where={"$or": tag_filters},
+                limit=n_results
+            )
+            return results
+        except:
+            return None
+    return None

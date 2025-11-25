@@ -4,10 +4,13 @@ config.py
 
 # Virtual Environment
 venv/
+env/
 
 # Data and Output
 chroma_store/chroma_data/
 output/markdown
+data/input_docs/*.docx
+output/markdown/*.md
 
 
 # Python
