@@ -263,6 +263,64 @@ After installation, configure...
 - [[User Manual]]
 - [[Troubleshooting Guide]]
 ```
+## Module Overview
+
+### Core Processing Modules
+
+**`docx_extractor.py`**
+- `extract_structured_content()` - Parses Word documents and extracts headings, paragraphs, tables, and images while preserving document hierarchy
+- `extract_heading_level()` - Identifies heading levels (H1-H6) from Word paragraph styles
+- Returns structured content objects with type information (heading/paragraph/image/table)
+
+**`hierarchical_chunker.py`**
+- `AdaptiveHierarchicalChunker.create_chunks()` - Splits documents by heading structure with fallback strategy (H1→H2→H3→paragraphs)
+- `DocumentChunk` class - Represents a content chunk with metadata (heading, level, parent/child relationships)
+- `_split_large_chunks()` - Recursively splits oversized sections to stay under token limits
+- Builds parent-child-sibling relationships automatically
+
+**`tree_manager.py`**
+- `TreeManager.get_minimal_context()` - Provides contextual information for a chunk (parent, siblings, children, breadcrumb)
+- `get_all_headings()` - Returns list of all document headings for link suggestion
+- Manages document hierarchy and provides ±N level context windows
+
+**`tag_extractor.py`**
+- `extract_tags()` - Uses GPT-4 to analyze document content and generate 5 relevant tags
+- Returns normalized tags (lowercase, hyphenated, alphanumeric only)
+- Fallback to title-based tags if AI extraction fails
+
+**`obsidian_generator.py`**
+- `generate_markdown_safe()` - Converts document chunks to Obsidian-compatible markdown with strict token limits
+- `create_frontmatter()` - Generates YAML frontmatter with title, tags, and metadata
+- `generate_fallback_markdown()` - Basic markdown conversion without AI (used when token limits approached)
+- Strips images during AI processing, re-adds them after conversion
+
+**`embedding_manager.py`**
+- `generate_embedding()` - Creates vector embeddings using Azure OpenAI text-embedding-ada-002
+- `store_chunk()` - Saves chunk text, embeddings, and metadata to ChromaDB
+- `query_by_tags()` - Retrieves chunks matching specific tags for filtered semantic search
+- Manages persistent ChromaDB vector database
+
+**`hybrid_linker.py`**
+- `HybridLinker.find_links()` - Three-tier strategy to find related documents:
+  - Tier 1: Deterministic (parent/child/sibling, exact heading matches)
+  - Tier 2: Tag-filtered semantic search (searches within matching tags)
+  - Tier 3: Full semantic search (discovers unexpected connections)
+- `generate_backlinks_section()` - Formats related notes as Obsidian [[wiki-links]]
+- Returns ranked list of most relevant document connections
+
+**`utils.py`**
+- `count_tokens()` - Counts tokens using tiktoken (cl100k_base encoding)
+- `truncate_text()` - Safely truncates text to maximum token count
+- `strip_images()` - Removes base64 image data from text for token efficiency
+- `get_text_preview()` - Creates short preview of content (first N characters)
+
+**`main.py`**
+- Orchestrates three-phase pipeline:
+  - Phase 1: Extract structure and create adaptive chunks
+  - Phase 2: Generate markdown and store embeddings
+  - Phase 3: Create intelligent links and append backlinks
+- Progress tracking with tqdm and detailed logging
+- Error handling and recovery for each document
 
 ## Performance 
 
