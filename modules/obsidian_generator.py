@@ -1,8 +1,7 @@
 from openai import AzureOpenAI
 from config import *
-import os
-import textwrap
 import re
+from modules.utils.utils import count_tokens, strip_images, truncate_text
 
 client = AzureOpenAI(
     api_key=AZURE_OPENAI_API_KEY,
@@ -10,99 +9,107 @@ client = AzureOpenAI(
     azure_endpoint=AZURE_OPENAI_ENDPOINT
 )
 
-def extract_images_from_text(text):
-    """
-    Extract embedded images from text and return text with placeholders.
-    Returns: (text_without_images, image_list)
-    """
-    # Pattern to match embedded images
-    image_pattern = r'!\[Image\]\(data:image/[^)]+\)'
+
+def generate_markdown_safe(chunk, context, all_headings):
+    """Generate markdown with STRICT token limits."""
     
-    images = re.findall(image_pattern, text)
+    # Get chunk content WITHOUT images first
+    content_no_images = chunk.get_text_without_images()
+    content_tokens = count_tokens(content_no_images)
     
-    # Replace images with numbered placeholders
-    text_with_placeholders = text
-    for i, img in enumerate(images):
-        placeholder = f"<<<IMAGE_{i}>>>"
-        text_with_placeholders = text_with_placeholders.replace(img, placeholder, 1)
+    # If chunk itself is too large, truncate it
+    if content_tokens > MAX_CHUNK_CONTENT_TOKENS:
+        print(f"        Truncating chunk content ({content_tokens} -> {MAX_CHUNK_CONTENT_TOKENS} tokens)")
+        content_no_images = truncate_text(content_no_images, MAX_CHUNK_CONTENT_TOKENS)
+        content_tokens = MAX_CHUNK_CONTENT_TOKENS
     
-    return text_with_placeholders, images
-
-def reinsert_images(text, images):
-    """
-    Replace image placeholders with actual embedded images.
-    """
-    result = text
-    for i, img in enumerate(images):
-        placeholder = f"<<<IMAGE_{i}>>>"
-        result = result.replace(placeholder, img)
+    # Build minimal context string
+    context_parts = []
     
-    return result
-
-def chunk_text(text, chunk_size=10000, overlap=200):
-    """Split long text into overlapping chunks while preserving images."""
-    # Extract images first
-    text_no_images, images = extract_images_from_text(text)
+    if context.get('parent_title'):
+        context_parts.append(f"Parent: {context['parent_title']}")
     
-    chunks = []
-    start = 0
-    while start < len(text_no_images):
-        end = start + chunk_size
-        chunk = text_no_images[start:end]
-        chunks.append(chunk)
-        start = end - overlap
+    if context.get('sibling_titles'):
+        siblings = ", ".join(context['sibling_titles'][:3])
+        context_parts.append(f"Siblings: {siblings}")
     
-    return chunks, images
+    if context.get('child_titles'):
+        children = ", ".join(context['child_titles'][:3])
+        context_parts.append(f"Subsections: {children}")
+    
+    context_str = " | ".join(context_parts) if context_parts else "Root section"
+    
+    # Limit available headings
+    headings_str = ", ".join(all_headings[:10])
+    
+    # Build prompt with token counting
+    prompt = f"""Convert this section to Obsidian markdown.
 
-def convert_to_lyt_markdown(content, title):
-    """Convert long Word document content to LYT-style Markdown in chunks."""
-    chunks, images = chunk_text(content)
-    full_markdown_output = f"# {title}\n\n"
+CONTEXT: {context_str}
+HEADING: {chunk.heading}
+AVAILABLE LINKS: {headings_str}
 
-    print(f"🧩 Splitting '{title}' into {len(chunks)} chunks for processing...")
+CONTENT:
+{content_no_images}
 
-    for i, chunk in enumerate(chunks, 1):
-        prompt = f"""Convert this text to clean Obsidian-compatible Markdown using LYT principles.
+RULES:
+1. Output ONLY markdown
+2. Use ## for heading
+3. Add [[links]] to related topics from available links
+4. Be concise
 
-CRITICAL RULES:
-1. Output ONLY the markdown - no preambles like "here is the conversion" or "sure"
-2. DO NOT modify or remove <<<IMAGE_X>>> placeholders - keep them EXACTLY as they appear
-3. Structure content with ## and ### headings
-4. Use [[internal links]] for related concepts
-5. Keep bullet points and formatting
-6. Be concise and atomic
+Markdown:"""
 
-Text to convert:
-{chunk}
+    # Check total prompt size
+    total_tokens = count_tokens(prompt) + 500  # Buffer for system message
+    
+    if total_tokens > MAX_TOTAL_PROMPT_TOKENS:
+        print(f"        Prompt too large ({total_tokens} tokens), using fallback")
+        return generate_fallback_markdown(chunk)
+    
+    try:
+        response = client.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=[
+                {"role": "system", "content": "Convert to markdown. Output ONLY markdown."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.3,
+            max_tokens=3000
+        )
+        
+        markdown = response.choices[0].message.content.strip()
+        markdown = re.sub(r'^(Sure|Here is).*?\n', '', markdown, flags=re.IGNORECASE)
+        markdown = re.sub(r'^```markdown\s*|\s*```$', '', markdown)
+        
+        # Re-add images from original chunk
+        images = chunk.get_text_content().split('\n')
+        image_lines = [line for line in images if line.strip().startswith('![Image](data:image')]
+        
+        if image_lines:
+            markdown += "\n\n" + "\n\n".join(image_lines)
+        
+        return markdown
+        
+    except Exception as e:
+        print(f"        Generation failed: {e}")
+        return generate_fallback_markdown(chunk)
 
-Remember: Output the markdown directly with NO conversational text."""
 
-        try:
-            response = client.chat.completions.create(
-                model=CHAT_MODEL,
-                messages=[
-                    {"role": "system", "content": "You are a markdown converter. Output ONLY markdown with no commentary or explanations."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.3  # Lower temperature for more consistent output
-            )
-            md_chunk = response.choices[0].message.content.strip()
-            
-            # Remove any common AI preambles if they slip through
-            md_chunk = re.sub(r'^(Sure[,!]?|Here is|Here\'s).*?(\n|:)', '', md_chunk, flags=re.IGNORECASE)
-            md_chunk = re.sub(r'^```markdown\s*', '', md_chunk)
-            md_chunk = re.sub(r'\s*```\s*$', '', md_chunk)
-            
-            full_markdown_output += md_chunk + "\n\n"
+def generate_fallback_markdown(chunk):
+    """Fallback: basic markdown without AI."""
+    content = chunk.get_text_content()
+    return f"## {chunk.heading}\n\n{content}"
 
-        except Exception as e:
-            print(f"⚠️ Error in chunk {i}: {e}")
-            # On error, include the original chunk
-            full_markdown_output += chunk + "\n\n"
-            continue
 
-    # Reinsert all images at their original positions
-    full_markdown_output = reinsert_images(full_markdown_output, images)
-
-    print(f"✅ Completed conversion for: {title}")
-    return full_markdown_output
+def create_frontmatter(title, tags, chunk_id, parent_id=None):
+    """Create YAML frontmatter."""
+    fm = ["---"]
+    fm.append(f'title: "{title}"')
+    fm.append(f'tags: [{", ".join(tags)}]')
+    fm.append(f'chunk_id: "{chunk_id}"')
+    if parent_id:
+        fm.append(f'parent: "{parent_id}"')
+    fm.append("---")
+    fm.append("")
+    return "\n".join(fm)
