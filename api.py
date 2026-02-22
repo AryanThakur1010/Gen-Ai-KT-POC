@@ -1,6 +1,5 @@
 """
 KT Pipeline Dashboard — FastAPI Backend
-Place this file at the ROOT of your GEN-AI-KT-POC project (same level as main.py)
 Run: uvicorn api:app --reload --port 8000
 """
 
@@ -41,7 +40,7 @@ app = FastAPI(title="KT Pipeline Dashboard API", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:4200", "http://localhost:3000"],
+    allow_origins=["*"],  # TEMP for debugging
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -57,13 +56,8 @@ os.makedirs(OBSIDIAN_VAULT_DIR, exist_ok=True)
 state_lock = threading.Lock()
 pipeline_running = False
 
-# doc_states: keyed by filename (e.g. "API-Guide.docx")
 doc_states: Dict[str, Dict[str, Any]] = {}
-
-# draft_decisions: keyed by filename → "pending" | "approved" | "rejected"
 draft_decisions: Dict[str, str] = {}
-
-# original texts saved during Phase 1
 original_texts: Dict[str, str] = {}
 
 # ─── WebSocket log broadcasting ───────────────────────────────────────────────
@@ -83,7 +77,6 @@ def _get_loop():
 
 
 def push_log(level: str, message: str, phase: int = 0):
-    """Broadcast a log entry to all connected WebSocket clients from any thread."""
     entry = {
         "timestamp": datetime.now().strftime("%H:%M:%S"),
         "level": level,
@@ -119,7 +112,6 @@ def _set_state(name: str, **kwargs):
 
 
 def _discover_existing_docs():
-    """Load state for files already in input dir and output dir on startup."""
     for f in os.listdir(INPUT_DIR):
         if f.endswith((".docx", ".doc")):
             path = os.path.join(INPUT_DIR, f)
@@ -153,33 +145,26 @@ _discover_existing_docs()
 
 # ─── Quality calculation ───────────────────────────────────────────────────────
 def calculate_quality(md_content: str, tags: List[str]) -> Dict[str, Any]:
-    """Parse generated markdown and produce quality scores (total out of 100)."""
     lines = md_content.split("\n")
 
-    # Frontmatter (10 pts)
     has_frontmatter = md_content.startswith("---")
     fm_score = 10 if has_frontmatter else 0
 
-    # Headings (20 pts)
     headings = [l for l in lines if re.match(r"^#{1,6} ", l)]
     h2_plus = [l for l in headings if re.match(r"^#{2,6} ", l)]
     heading_score = min(20, len(h2_plus) * 4)
 
-    # Wiki links (25 pts)
     wiki_links = re.findall(r"\[\[.+?\]\]", md_content)
     unresolved = [l for l in wiki_links if "unresolved" in l.lower() or "missing" in l.lower()]
     link_score = min(25, len(wiki_links) * 2)
     link_score = max(0, link_score - len(unresolved) * 3)
 
-    # Content depth (20 pts)
     body = re.sub(r"^---[\s\S]+?---\n", "", md_content)
     words = len(body.split())
     content_score = min(20, words // 50)
 
-    # Tags (10 pts)
     tag_score = min(10, len(tags) * 3)
 
-    # Rich elements: code blocks, tables, blockquotes (15 pts)
     code_blocks = len(re.findall(r"```", md_content)) // 2
     tables = len([l for l in lines if l.strip().startswith("|")])
     blockquotes = len([l for l in lines if l.strip().startswith(">")])
@@ -209,15 +194,13 @@ def calculate_quality(md_content: str, tags: List[str]) -> Dict[str, Any]:
     }
 
 
-# ─── Pipeline execution (runs in background thread) ───────────────────────────
+# ─── Pipeline execution ────────────────────────────────────────────────────────
 def _run_pipeline_for_doc(filename: str):
-    """Execute all 3 phases for a single document, updating state throughout."""
     global pipeline_running
     title = os.path.splitext(filename)[0]
     doc_path = os.path.join(INPUT_DIR, filename)
 
     try:
-        # ── Phase 1: Extract & Chunk ──────────────────────────────────────────
         push_log("info", f"[{filename}] Phase 1 started — extracting structure", 1)
         _set_state(filename, status="processing", phase=1, progress=5, error=None)
 
@@ -226,7 +209,6 @@ def _run_pipeline_for_doc(filename: str):
         push_log("ok", f"[{filename}] Extracted {blocks} content blocks", 1)
         _set_state(filename, blocks=blocks, progress=20)
 
-        # Save original text for draft panel
         original = "\n\n".join(
             item.text for item in structured_content
             if item.type in ("heading", "paragraph", "table") and item.text.strip()
@@ -243,14 +225,12 @@ def _run_pipeline_for_doc(filename: str):
         push_log("ok", f"[{filename}] Tags extracted: {', '.join(tags)}", 1)
         _set_state(filename, tags=tags, chunks=len(chunks), progress=45)
 
-        # ── Phase 2: Markdown Generation & Embedding ──────────────────────────
         push_log("info", f"[{filename}] Phase 2 started — generating markdown + embeddings", 2)
         _set_state(filename, phase=2, progress=50)
 
         tree_manager = TreeManager(chunks, max_levels=MAX_CONTEXT_LEVELS)
         all_headings = tree_manager.get_all_headings()
         markdown_sections = []
-
         total_chunks = sum(1 for c in chunks if c.level > 0)
         processed = 0
 
@@ -275,7 +255,6 @@ def _run_pipeline_for_doc(filename: str):
         push_log("ok", f"[{filename}] Saved {len(markdown_sections)} sections → {md_path}", 2)
         _set_state(filename, phase=2, progress=80)
 
-        # ── Phase 3: Intelligent Linking ──────────────────────────────────────
         push_log("info", f"[{filename}] Phase 3 started — semantic link generation", 3)
         _set_state(filename, phase=3, progress=82)
 
@@ -295,7 +274,6 @@ def _run_pipeline_for_doc(filename: str):
 
         push_log("ok", f"[{filename}] Generated {len(all_links)} semantic links (Tier 1+2+3)", 3)
 
-        # ── Quality calculation ───────────────────────────────────────────────
         with open(md_path, "r", encoding="utf-8") as f:
             md_content = f.read()
 
@@ -327,14 +305,13 @@ def _run_pipeline_for_doc(filename: str):
 
 
 def _run_pipeline_background(filenames: List[str]):
-    """Run pipeline for multiple files sequentially in a background thread."""
     global pipeline_running
     for f in filenames:
         _run_pipeline_for_doc(f)
     pipeline_running = False
 
 
-# ─── WebSocket endpoint ────────────────────────────────────────────────────────
+# ─── WebSocket ────────────────────────────────────────────────────────────────
 @app.websocket("/ws/logs")
 async def ws_logs(ws: WebSocket):
     global _event_loop
@@ -343,7 +320,7 @@ async def ws_logs(ws: WebSocket):
     ws_clients.append(ws)
     try:
         while True:
-            await ws.receive_text()  # keep alive
+            await ws.receive_text()
     except WebSocketDisconnect:
         if ws in ws_clients:
             ws_clients.remove(ws)
@@ -352,7 +329,6 @@ async def ws_logs(ws: WebSocket):
 # ─── Document endpoints ────────────────────────────────────────────────────────
 @app.get("/api/documents")
 def get_documents():
-    _discover_existing_docs()
     with state_lock:
         return list(doc_states.values())
 
@@ -372,6 +348,7 @@ async def upload_documents(files: List[UploadFile] = File(...)):
         size_mb = round(len(content) / 1024 / 1024, 2)
         title = os.path.splitext(file.filename)[0]
         _set_state(
+            file.filename,
             name=file.filename,
             title=title,
             size_mb=size_mb,
@@ -391,6 +368,36 @@ async def upload_documents(files: List[UploadFile] = File(...)):
         uploaded.append(file.filename)
 
     return {"uploaded": uploaded}
+
+
+@app.delete("/api/documents/all")
+def delete_all_documents():
+    """Remove every document (source .docx + markdown + vault copy) and wipe all state."""
+    if pipeline_running:
+        raise HTTPException(409, "Stop the pipeline before deleting all documents")
+
+    with state_lock:
+        all_names = list(doc_states.keys())
+
+    deleted = []
+    for filename in all_names:
+        title = os.path.splitext(filename)[0]
+        for path in [
+            os.path.join(INPUT_DIR, filename),
+            os.path.join(OUTPUT_MD_DIR, f"{title}.md"),
+            os.path.join(OBSIDIAN_VAULT_DIR, f"{title}.md"),
+        ]:
+            if os.path.exists(path):
+                os.remove(path)
+        draft_decisions.pop(filename, None)
+        original_texts.pop(filename, None)
+        deleted.append(filename)
+
+    with state_lock:
+        doc_states.clear()
+
+    push_log("warn", f"All documents deleted — {len(deleted)} file(s) removed", 0)
+    return {"deleted": deleted, "count": len(deleted)}
 
 
 @app.delete("/api/documents/{filename}")
@@ -530,10 +537,56 @@ def get_drafts():
     return drafts
 
 
+@app.delete("/api/drafts")
+def delete_all_drafts():
+    """
+    Delete every generated .md file (output/markdown + obsidian_vault) and
+    reset each document's draft_status to 'none'. The source .docx files are
+    kept so the user can re-run the pipeline.
+    """
+    with state_lock:
+        targets = [
+            name for name, s in doc_states.items()
+            if s.get("draft_status") in ("pending", "approved", "rejected")
+        ]
+
+    deleted = []
+    for filename in targets:
+        title = os.path.splitext(filename)[0]
+
+        # Remove generated markdown from output/markdown/
+        md_path = os.path.join(OUTPUT_MD_DIR, f"{title}.md")
+        if os.path.exists(md_path):
+            os.remove(md_path)
+
+        # Remove vault copy if it was approved
+        vault_path = os.path.join(OBSIDIAN_VAULT_DIR, f"{title}.md")
+        if os.path.exists(vault_path):
+            os.remove(vault_path)
+
+        # Reset in-memory state — keep the document entry but wipe draft fields
+        _set_state(
+            filename,
+            draft_status="none",
+            status="queued",
+            phase=0,
+            progress=0,
+            links=0,
+            unresolved_links=0,
+            quality=None,
+            error=None,
+        )
+        draft_decisions.pop(filename, None)
+        original_texts.pop(filename, None)
+        deleted.append(filename)
+
+    push_log("warn", f"All drafts deleted — {len(deleted)} document(s) reset to queued", 0)
+    return {"deleted": deleted, "count": len(deleted)}
+
+
 @app.get("/api/drafts/{filename}/original")
 def get_draft_original(filename: str):
     if filename not in original_texts:
-        # Try to re-extract if not in memory
         path = os.path.join(INPUT_DIR, filename)
         if not os.path.exists(path):
             raise HTTPException(404, "Source document not found")
@@ -566,7 +619,6 @@ def approve_draft(filename: str):
     md_path = os.path.join(OUTPUT_MD_DIR, f"{title}.md")
     if not os.path.exists(md_path):
         raise HTTPException(404, "Markdown not found")
-
     dest = os.path.join(OBSIDIAN_VAULT_DIR, f"{title}.md")
     shutil.copy2(md_path, dest)
     _set_state(filename, draft_status="approved")
@@ -585,7 +637,6 @@ def reject_draft(filename: str):
 
 @app.post("/api/drafts/{filename}/save-edit")
 async def save_draft_edit(filename: str, body: dict):
-    """Save user edits to the generated markdown."""
     title = os.path.splitext(filename)[0]
     md_path = os.path.join(OUTPUT_MD_DIR, f"{title}.md")
     content = body.get("content", "")
@@ -595,6 +646,24 @@ async def save_draft_edit(filename: str, body: dict):
         f.write(content)
     push_log("info", f"Draft edited and saved: {filename}", 0)
     return {"saved": filename}
+
+
+@app.delete("/api/drafts/{filename}")
+def delete_draft(filename: str):
+    title = os.path.splitext(filename)[0]
+    for path in [
+        os.path.join(INPUT_DIR, filename),
+        os.path.join(OUTPUT_MD_DIR, f"{title}.md"),
+        os.path.join(OBSIDIAN_VAULT_DIR, f"{title}.md"),
+    ]:
+        if os.path.exists(path):
+            os.remove(path)
+    with state_lock:
+        doc_states.pop(filename, None)
+        draft_decisions.pop(filename, None)
+        original_texts.pop(filename, None)
+    push_log("warn", f"Draft deleted: {filename}", 0)
+    return {"deleted": filename}
 
 
 # ─── Quality endpoints ─────────────────────────────────────────────────────────
@@ -610,10 +679,7 @@ def get_all_quality():
                     content = f.read()
                 quality = calculate_quality(content, state.get("tags", []))
                 _set_state(name, quality=quality)
-                results.append({
-                    **state,
-                    "quality": quality,
-                })
+                results.append({**state, "quality": quality})
     return results
 
 
